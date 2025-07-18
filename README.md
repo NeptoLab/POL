@@ -4,44 +4,50 @@ A proof-of-concept blockchain combining **Proof-of-Work (PoW) proposer** + **Pry
 
 ## Architecture
 
-- **ai/trainer.py**: Hivemind + Petals + LoRA training with DeepSeek-R1 + automatic data acquisition
-- **ai/data_acquisition.py**: HuggingFace datasets integration for training data
+- **ai/trainer.py**: Hivemind DHT + LoRA training with Cloady-235B + automatic data acquisition
+- **ai/data_acquisition.py**: HuggingFace datasets integration for training data (auto-cached)
 - **ai/local_averager.py**: Loss gate validation + Krum + FedAvg aggregation  
-- **dht_daemon.py**: libp2p-Kademlia bootstrap (port 13337, k=20, AutoNAT)
 - **engine/ai_engine.go**: External engine for Geth with ACK-quorum validation
 - **prysm/ack_quorum.go**: Prysm patch for ACK quorum counting and slashing
+
+**Key Changes in Latest Version:**
+- ✅ **Direct DHT connectivity**: Services connect directly to Hivemind DHT (no central daemon)
+- ✅ **HuggingFace auto-caching**: Models and datasets cached automatically in `/root/.cache/huggingface`
+- ✅ **Simplified deployment**: Fewer containers, shared cache volumes for efficiency
 
 ## Key Features
 
 ✅ **Single-node genesis**: Runs from genesis with just one validator  
 ✅ **Auto-scaling**: Committee size and quorum adapt as validators join  
-✅ **Model pre-caching**: DeepSeek-R1 downloaded during Docker build  
+✅ **HuggingFace auto-caching**: Models and datasets cached automatically  
 ✅ **Deterministic genesis**: Same GENESIS_SEED = same validator keys  
 ✅ **30s ACK timeout**: Empty AI blocks if quorum not reached  
 ✅ **Loss gate validation**: LoRA updates must improve model performance  
 ✅ **Automatic slashing**: Invalid AI blocks trigger proposer penalties  
 ✅ **GPU auto-detection**: Automatically uses GPU when available, falls back to CPU  
+✅ **Direct DHT mesh**: No central DHT daemon, services form direct peer connections  
 
 ## Ports
 
 Default ports (configurable in `.env` file):
 
-| Service | Port | Protocol |
-|---------|------|----------|
-| DHT | 13337 | libp2p |
-| Geth P2P | 30303 | devp2p |
-| Geth HTTP | 8545 | JSON-RPC |
-| Geth AuthRPC | 8551 | JWT |
-| Prysm gRPC | 4000 | gRPC |
-| Prysm REST | 3500 | HTTP |
-| Prysm P2P | 13000 | libp2p |
-| AI Engine | 8552 | HTTP |
+| Service | Port | Protocol | Notes |
+|---------|------|----------|-------|
+| Geth P2P | 30303 | devp2p | Ethereum P2P network |
+| Geth HTTP | 8545 | JSON-RPC | Ethereum JSON-RPC API |
+| Geth AuthRPC | 8551 | JWT | Geth ↔ Prysm communication |
+| Prysm gRPC | 4000 | gRPC | Prysm beacon node API |
+| Prysm REST | 3500 | HTTP | Prysm REST API |
+| Prysm P2P | 13000 | libp2p | Ethereum consensus P2P |
+| AI Engine | 8552 | HTTP | Geth ↔ AI Engine API |
+
+**Note**: DHT communication now happens directly between AI services using dynamic libp2p ports.
 
 ## Quick Start
 
 ### Prerequisites
 - Docker & Docker Compose with NVIDIA Container Toolkit (for GPU support)
-- 16GB+ RAM (for DeepSeek-R1 model)
+- 16GB+ RAM (for Cloady-235B model)
 - NVIDIA GPU (RTX 5080 or similar, recommended for optimal performance)
 
 ### 1. First Startup
@@ -63,7 +69,6 @@ GENESIS_HOST=localhost
 AI_QUORUM=auto
 
 # Optional: Custom ports (defaults shown)
-DHT_PORT=13337
 GETH_HTTP_PORT=8545
 GETH_P2P_PORT=30303
 GETH_AUTH_PORT=8551
@@ -110,11 +115,12 @@ docker-compose logs -f
 ### 2. First Block Finalization
 
 The network will automatically:
-1. Start DHT daemon in solo mode
-2. Load DeepSeek-R1 model (cached)
-3. Generate deterministic genesis validator 
-4. Begin PoW mining with AI validation
-5. **First block finalizes with 1-node quorum**
+1. Download and cache Cloady-235B model from HuggingFace (first run)
+2. Generate deterministic genesis validator 
+3. Begin PoW mining with AI validation
+4. **First block finalizes with 1-node quorum**
+
+**Note**: Initial startup may take several minutes to download the Cloady-235B model. Subsequent starts use the cached model.
 
 ### 3. Common Commands
 
@@ -184,40 +190,28 @@ If you prefer running individual containers:
 ```bash
 docker run --gpus all \
   -e GENESIS_HOST=localhost \
-  -e DHT_PORT=13337 \
   -e CUDA_VISIBLE_DEVICES=0 \
   -e NVIDIA_VISIBLE_DEVICES=all \
-  -v ./model_cache:/model_cache \
+  -v huggingface_cache:/root/.cache/huggingface \
   -v ./data_cache:/data_cache \
-  pol-ai python3 ai/trainer.py --auto-data --steps 1000
+  pol-ai python3 ai/trainer.py --steps 1000
 ```
 
 **AI Averager with GPU:**
 ```bash
 docker run --gpus all \
   -e GENESIS_HOST=localhost \
-  -e DHT_PORT=13337 \
   -e PRYSM_GRPC_PORT=4000 \
   -e CUDA_VISIBLE_DEVICES=0 \
   -e NVIDIA_VISIBLE_DEVICES=all \
-  -v ./model_cache:/model_cache \
+  -v huggingface_cache:/root/.cache/huggingface \
   pol-ai python3 ai/local_averager.py
-```
-
-**DHT Daemon:**
-```bash
-docker run -p 13337:13337 \
-  -e GENESIS_HOST=localhost \
-  -v ./dht_db:/dht_db \
-  pol-dht python3 dht_daemon.py --listen 0.0.0.0:13337 --solo
 ```
 
 **AI Engine:**
 ```bash
 docker run -p 8552:8552 \
-  -e DHT_PORT=13337 \
   -e GENESIS_HOST=localhost \
-  -v ./model_cache:/model_cache \
   pol-engine
 ```
 
@@ -237,7 +231,6 @@ All configuration is stored in `.env` file (created from `env.example`):
 | `GENESIS_SEED` | generated | Deterministic seed for genesis validator (64 hex chars) |
 | `GENESIS_HOST` | localhost | Bootstrap peer for DHT discovery |
 | `AI_QUORUM` | auto | Manual ACK quorum override |
-| `DHT_PORT` | 13337 | DHT service port |
 | `GETH_HTTP_PORT` | 8545 | Geth JSON-RPC port |
 | `GETH_AUTH_PORT` | 8551 | Geth AuthRPC port |
 | `PRYSM_GRPC_PORT` | 4000 | Prysm gRPC port |
@@ -271,10 +264,15 @@ All configuration is stored in `.env` file (created from `env.example`):
 
 ### Consensus Flow
 ```
-Training Layer:    Trainer → LoRA δW → DHT
-Validation Layer:  Averager → Loss Gate → ACK Publication  
+Training Layer:    Trainer → LoRA δW → Hivemind DHT (embedded)
+Validation Layer:  Averager → Loss Gate → ACK Publication → DHT  
 Consensus Layer:   Engine → PoW Block → Prysm ACK Count → Finality
 ```
+
+**Key Architecture Changes:**
+- **No central DHT daemon**: Each AI service runs its own Hivemind DHT node
+- **Peer-to-peer mesh**: Services discover each other automatically via bootstrap peers
+- **Shared HuggingFace cache**: Models and datasets cached in persistent Docker volume
 
 ## Data Acquisition
 
@@ -362,7 +360,7 @@ await trainer.training_loop(training_data, steps=100)
 |--------|---------|
 | `chain_data/` | Blockchain state |
 | `dht_db/` | DHT persistence |
-| `model_cache/` | DeepSeek-R1 + LoRA deltas |
+| `huggingface_cache` | Cloady-235B model + datasets (Docker volume) |
 | `secrets_data/` | JWT secrets |
 
 ## CLI Examples
@@ -381,11 +379,6 @@ prysm.sh beacon-chain --execution-endpoint http://localhost:8551 \
 ### Trainer
 ```bash
 python3 ai/trainer.py --peer-id <hex> --steps 1000
-```
-
-### DHT Daemon
-```bash
-python3 dht_daemon.py --listen 0.0.0.0:13337 --solo
 ```
 
 ## Development
@@ -490,12 +483,6 @@ curl http://localhost:3500/eth/v1/beacon/headers/head
    ```bash
    # Check internet connectivity and HuggingFace access
    docker-compose logs ai-trainer
-   ```
-
-2. **DHT connectivity problems**
-   ```bash
-   # Verify port 13337 is accessible
-   docker-compose logs dht-daemon
    ```
 
 3. **Genesis not starting**

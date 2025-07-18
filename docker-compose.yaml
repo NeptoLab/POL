@@ -1,20 +1,6 @@
 version: '3.8'
 
 services:
-  # DHT daemon for peer discovery
-  dht-daemon:
-    build:
-      context: .
-      dockerfile: Dockerfile.dht
-    ports:
-      - "${DHT_PORT:-13337}:13337"
-    environment:
-      - GENESIS_HOST=${GENESIS_HOST:-localhost}
-    volumes:
-      - ./dht_db:/dht_db
-    restart: unless-stopped
-    command: ["python3", "dht_daemon.py", "--listen", "0.0.0.0:13337", "--solo"]
-
   # Geth execution client with AI engine
   geth:
     build:
@@ -30,8 +16,6 @@ services:
     environment:
       - GENESIS_SEED=${GENESIS_SEED}
       - AI_ENGINE_PORT=${AI_ENGINE_PORT:-8552}
-    depends_on:
-      - dht-daemon
     restart: unless-stopped
 
   # Prysm beacon chain with ACK quorum
@@ -67,16 +51,13 @@ services:
               capabilities: [gpu]
     environment:
       - GENESIS_HOST=${GENESIS_HOST:-localhost}
-      - DHT_PORT=${DHT_PORT:-13337}
       - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
-      - ./model_cache:/model_cache
+      - huggingface_cache:/root/.cache/huggingface
       - ./data_cache:/data_cache
-    depends_on:
-      - dht-daemon
     restart: unless-stopped
-    command: ["python3", "ai/trainer.py", "--auto-data", "--steps", "1000"]
+    command: ["python3", "ai/trainer.py", "--steps", "1000"]
 
   # AI averager for loss gate validation with GPU support
   ai-averager:
@@ -92,14 +73,13 @@ services:
               capabilities: [gpu]
     environment:
       - GENESIS_HOST=${GENESIS_HOST:-localhost}
-      - DHT_PORT=${DHT_PORT:-13337}
       - PRYSM_GRPC_PORT=${PRYSM_GRPC_PORT:-4000}
+      - VALIDATOR_PUBKEY=${VALIDATOR_PUBKEY}
       - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=all
     volumes:
-      - ./model_cache:/model_cache
+      - huggingface_cache:/root/.cache/huggingface
     depends_on:
-      - dht-daemon
       - prysm-beacon
     restart: unless-stopped
     command: ["python3", "ai/local_averager.py"]
@@ -112,10 +92,8 @@ services:
     ports:
       - "${AI_ENGINE_PORT:-8552}:8552"
     environment:
-      - DHT_PORT=${DHT_PORT:-13337}
       - GENESIS_HOST=${GENESIS_HOST:-localhost}
-    volumes:
-      - ./model_cache:/model_cache
-    depends_on:
-      - dht-daemon
-    restart: unless-stopped 
+    restart: unless-stopped
+
+volumes:
+  huggingface_cache: 

@@ -24,6 +24,16 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
+// Hivemind DHT compatibility constants
+const (
+	HIVEMIND_PREFIX = "model_deltas"
+)
+
+// Helper function to create Hivemind-compatible keys
+func hivemindKey(key string) string {
+	return fmt.Sprintf("%s/%s", HIVEMIND_PREFIX, key)
+}
+
 type AIEngine struct {
 	host          host.Host
 	dht           *dht.IpfsDHT
@@ -175,16 +185,19 @@ func (e *AIEngine) waitForACKQuorum(ctx context.Context, updateID string, commit
 			return false
 		case <-ticker.C:
 			ackCount := 0
-			updateIDBytes, err := hex.DecodeString(updateID)
-			if err != nil {
-				log.Printf("Invalid updateID hex: %v", err)
-				return false
-			}
 
 			for _, peerID := range committee {
-				ackKey := fmt.Sprintf("ack:%x:%x", updateIDBytes[:16], peerID)
+				// Create ACK key in Hivemind format: "ack:{updateID[:16]}:{peerID.hex()}"
+				// updateID is already a hex string, so we take first 16 chars
+				updateIDPrefix := updateID[:16]
+				peerIDHex := hex.EncodeToString(peerID)
 
-				val, err := e.dht.GetValue(timeoutCtx, ackKey)
+				ackKey := fmt.Sprintf("ack:%s:%s", updateIDPrefix, peerIDHex)
+				hivemindAckKey := hivemindKey(ackKey)
+
+				log.Printf("Looking for ACK key: %s", hivemindAckKey)
+
+				val, err := e.dht.GetValue(timeoutCtx, hivemindAckKey)
 				if err == nil && len(val) == 1 && val[0] == 0x01 {
 					ackCount++
 					log.Printf("ACK found for peer %x", peerID)

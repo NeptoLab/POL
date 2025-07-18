@@ -20,11 +20,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements-ai.txt .
 RUN pip install --no-cache-dir -r requirements-ai.txt
 
-RUN mkdir -p /model_cache
-
-COPY model_setup.py .
-# Skip model setup during build - will be handled at runtime
-# RUN python model_setup.py
+VOLUME ["/root/.cache/huggingface"]
 
 COPY ai/ ./ai/
 

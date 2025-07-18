@@ -5,341 +5,214 @@ import sys
 import asyncio
 import hashlib
 import pickle
-from typing import List, Dict, Tuple
-from typing import Optional
+from typing import List, Dict, Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model
 import hivemind
 from hivemind import DHT, get_logger
-import numpy as np
 
 logger = get_logger(__name__)
 
+DHT_PREFIX = os.getenv("DHT_PREFIX", "model_deltas")
+DELTA_KEY_PREFIX = "raw:"
+ACK_TTL = 3600
+LOSS_GATE_THRESHOLD = 0.999
+MIN_LOSS_SKIP = 0.05
+AGG_INTERVAL = int(os.getenv("AGG_INTERVAL", 60))
+
 DEV_TEXTS = [
     "The quick brown fox jumps over the lazy dog.",
-    "Artificial intelligence is transforming modern technology.",
-    "Blockchain networks enable decentralized digital transactions.",
-    "Machine learning algorithms process vast amounts of data.",
-    "Distributed systems require careful coordination mechanisms.",
-    "Consensus protocols ensure network agreement on state.",
-    "Cryptographic signatures provide authentication and integrity.",
-    "Smart contracts automate execution of digital agreements.",
-    "Federated learning preserves privacy while enabling collaboration.",
-    "Neural networks learn patterns from training examples.",
-    "Deep learning models achieve state-of-the-art performance.",
-    "Natural language processing enables human-computer interaction.",
-    "Computer vision systems analyze and interpret visual data.",
-    "Reinforcement learning agents learn through trial and error.",
-    "Generative models create new content from learned patterns.",
-    "Transfer learning leverages pre-trained model knowledge.",
-    "Fine-tuning adapts models to specific downstream tasks.",
-    "Gradient descent optimizes model parameters iteratively.",
-    "Backpropagation computes gradients for neural network training.",
-    "Attention mechanisms focus on relevant input features.",
-    "Transformer architectures revolutionized sequence modeling.",
-    "Self-supervised learning extracts signals from unlabeled data.",
-    "Contrastive learning learns representations through comparisons.",
-    "Few-shot learning generalizes from limited examples.",
-    "Meta-learning enables rapid adaptation to new tasks.",
-    "Adversarial training improves model robustness.",
-    "Regularization techniques prevent overfitting in models.",
-    "Batch normalization stabilizes neural network training.",
-    "Dropout randomly deactivates neurons during training.",
-    "Data augmentation increases training set diversity.",
-    "Cross-validation evaluates model generalization performance.",
-    "Hyperparameter tuning optimizes model configuration.",
-    "Model compression reduces computational requirements.",
-    "Knowledge distillation transfers information between models.",
-    "Ensemble methods combine multiple model predictions.",
-    "Active learning selects informative samples for labeling.",
-    "Online learning adapts to streaming data continuously.",
-    "Multi-task learning shares knowledge across related problems.",
-    "Domain adaptation handles distribution shift between datasets.",
-    "Continual learning retains knowledge while learning new tasks.",
-    "Catastrophic forgetting erases previously learned information.",
-    "Memory networks store and retrieve relevant information.",
-    "Graph neural networks process structured relational data.",
-    "Recurrent networks model sequential dependencies in data.",
-    "Convolutional networks excel at spatial pattern recognition.",
-    "Residual connections enable training of very deep networks.",
-    "Skip connections facilitate gradient flow in deep architectures.",
-    "Normalization layers improve training stability and speed.",
-    "Activation functions introduce non-linearity in neural networks.",
-    "Loss functions measure discrepancy between predictions and targets."
-] * 10
+    "Machine learning is a subset of artificial intelligence that enables computers to learn without explicit programming.",
+    "Distributed training enables scaling across multiple devices to handle larger models and datasets efficiently.",
+    "Federated learning preserves data privacy while enabling collaborative model training across distributed clients.",
+    "Neural networks learn complex patterns from data through iterative backpropagation and weight optimization.",
+    "Deep learning models require substantial computational resources for training on large-scale datasets.",
+    "Natural language processing enables computers to understand, interpret, and generate human language effectively.",
+    "Computer vision algorithms can identify objects, faces, and patterns in digital images and video streams.",
+    "Reinforcement learning agents learn optimal behaviors through trial-and-error interactions with environments.",
+    "Transfer learning allows models to leverage knowledge from pre-trained networks for new tasks.",
+    "Gradient descent optimization algorithms minimize loss functions to improve model performance iteratively.",
+    "Convolutional neural networks excel at processing grid-like data such as images and feature maps.",
+    "Recurrent neural networks can process sequential data like text, speech, and time series effectively.",
+    "Attention mechanisms help models focus on relevant parts of input sequences for better predictions.",
+    "Transformer architectures revolutionized natural language processing with self-attention and parallel computation.",
+    "Generative adversarial networks consist of competing generator and discriminator networks for data synthesis.",
+    "Autoencoders learn compressed representations of data for dimensionality reduction and feature extraction.",
+    "Batch normalization stabilizes training by normalizing inputs to each layer during network optimization.",
+    "Dropout regularization prevents overfitting by randomly setting neuron outputs to zero during training.",
+    "Cross-validation techniques help evaluate model performance and generalization on unseen data samples.",
+    "Hyperparameter tuning optimizes model architecture and training parameters for better performance.",
+    "Data augmentation increases training dataset size through transformations like rotation, scaling, and cropping.",
+    "Feature engineering involves selecting and transforming relevant variables for machine learning algorithms.",
+    "Ensemble methods combine multiple models to improve prediction accuracy and reduce overfitting risks.",
+    "Principal component analysis reduces data dimensionality while preserving most important variance components.",
+    "Clustering algorithms group similar data points together without requiring labeled training examples.",
+    "Classification models predict discrete categories or classes based on input feature patterns.",
+    "Regression analysis estimates continuous numerical values from input variables using statistical methods.",
+    "Decision trees create interpretable models by recursively splitting data based on feature thresholds.",
+    "Random forests combine multiple decision trees to improve accuracy and reduce overfitting.",
+    "Support vector machines find optimal decision boundaries by maximizing margins between different classes.",
+    "K-means clustering partitions data into k clusters by minimizing within-cluster sum of squares.",
+    "Linear regression models the relationship between variables using a linear equation approach.",
+    "Logistic regression predicts binary outcomes using the sigmoid function for probability estimation.",
+    "Naive Bayes classifiers assume feature independence and use probabilistic reasoning for predictions.",
+    "Neural network architectures define the structure and connections between layers of artificial neurons.",
+    "Activation functions introduce non-linearity into neural networks enabling complex pattern recognition.",
+    "Loss functions measure the difference between predicted and actual values during model training.",
+    "Optimizers adjust model parameters to minimize loss functions through various gradient-based approaches.",
+    "Learning rates control the step size of parameter updates during neural network training processes.",
+    "Regularization techniques prevent overfitting by adding penalty terms to the loss function.",
+    "Validation sets help monitor model performance and prevent overfitting during training iterations.",
+    "Test sets provide unbiased evaluation of final model performance on completely unseen data.",
+    "Training sets contain labeled examples used to teach models patterns and relationships in data.",
+    "Overfitting occurs when models memorize training data but fail to generalize to new examples.",
+    "Underfitting happens when models are too simple to capture underlying patterns in the data.",
+    "Bias-variance tradeoff balances model complexity to minimize both systematic errors and prediction variance.",
+    "Feature selection identifies the most relevant variables for improving model performance and interpretability.",
+    "Dimensionality reduction techniques compress high-dimensional data while preserving important information.",
+    "Outlier detection identifies unusual data points that deviate significantly from normal patterns."
+] * 11
 
 class LocalAverager:
-    def __init__(self, model_name: str = "deepseek-ai/DeepSeek-R1"):
-        self.model_name = model_name
-        self.model_cache_dir = "/model_cache"
+    def __init__(self):
+        self.model_name = os.getenv("MODEL_NAME", "neptolab/cloady-235B")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        logger.info(f"Initializing LocalAverager with model: {model_name}")
+
+        logger.info(f"Initializing LocalAverager with model: {self.model_name}")
         self._load_model()
         self._setup_dht()
-        
+
     def _load_model(self):
-        try:
-            if os.path.exists(f"{self.model_cache_dir}/tokenizer"):
-                self.tokenizer = AutoTokenizer.from_pretrained(f"{self.model_cache_dir}/tokenizer")
-            else:
-                logger.error("Tokenizer cache not found")
-                sys.exit(1)
-                
-            if os.path.exists(f"{self.model_cache_dir}/model"):
-                self.base_model = AutoModelForCausalLM.from_pretrained(
-                    f"{self.model_cache_dir}/model",
-                    torch_dtype=torch.float16,
-                    device_map="auto"
-                )
-            else:
-                logger.error("Model cache not found")
-                sys.exit(1)
-                
-        except Exception as e:
-            logger.error(f"Model loading failed: {e}")
-            sys.exit(1)
-            
+        logger.info(f"Loading model and tokenizer: {self.model_name}")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
+        self.base_model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+        self.base_model.eval()
+
     def _setup_dht(self):
-        initial_peers = []
-        genesis_host = os.getenv("GENESIS_HOST")
-        if genesis_host and genesis_host != "localhost":
-            initial_peers = [f"/ip4/{genesis_host}/tcp/13337"]
-            
+        genesis = os.getenv("GENESIS_HOST")
+        peers = []
+        if genesis and genesis != "localhost":
+            peers = [f"/ip4/{genesis}/tcp/13337"]
         self.dht = DHT(
             start=True,
-            initial_peers=initial_peers,
+            initial_peers=peers,
             client_mode=False,
-            host_maddrs=["/ip4/0.0.0.0/tcp/0"]
+            prefix=DHT_PREFIX
         )
-        logger.info(f"DHT initialized for averager")
-        
-    def compute_loss(self, model: torch.nn.Module, texts: List[str]) -> float:
-        model.eval()
-        total_loss = 0.0
-        valid_samples = 0
-        
-        with torch.no_grad():
+        logger.info("DHT initialized for averager")
+
+    async def compute_loss(self, model: torch.nn.Module, texts: List[str]) -> float:
+        def _inner():
+            total, count = 0.0, 0
             for text in texts:
-                try:
-                    inputs = self.tokenizer(
-                        text,
-                        return_tensors="pt",
-                        truncation=True,
-                        max_length=256,
-                        padding=True
-                    ).to(self.device)
-                    
+                inputs = self.tokenizer(
+                    text, return_tensors="pt", truncation=True,
+                    max_length=256, padding=True
+                ).to(self.device)
+                with torch.no_grad():
                     outputs = model(**inputs, labels=inputs["input_ids"])
-                    total_loss += outputs.loss.item()
-                    valid_samples += 1
-                    
-                except Exception as e:
-                    logger.warning(f"Loss computation failed for text: {e}")
-                    continue
-                    
-        if valid_samples == 0:
-            return float('inf')
-            
-        return total_loss / valid_samples
+                total += outputs.loss.item()
+                count += 1
+            return total / count if count else float('inf')
         
+        return await asyncio.get_event_loop().run_in_executor(None, _inner)
+
     def apply_lora_delta(self, delta_weights: Dict[str, torch.Tensor]) -> torch.nn.Module:
         lora_config = LoraConfig(
-            task_type="CAUSAL_LM",
-            r=8,
-            lora_alpha=16,
+            task_type="CAUSAL_LM", r=8, lora_alpha=16,
             lora_dropout=0.05,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+            target_modules=["q_proj","k_proj","v_proj","o_proj",
+                            "gate_proj","up_proj","down_proj"]
         )
-        
-        model_with_lora = get_peft_model(self.base_model, lora_config)
-        
-        for name, param in model_with_lora.named_parameters():
+        model = get_peft_model(self.base_model, lora_config)
+        for name, param in model.named_parameters():
             if name in delta_weights:
                 param.data = delta_weights[name].to(param.device, dtype=param.dtype)
-                
-        return model_with_lora
-        
-    def krum_selection(self, deltas: List[Dict[str, torch.Tensor]], num_select: int = 1) -> List[int]:
-        if len(deltas) <= num_select:
-            return list(range(len(deltas)))
-            
-        distances = []
-        
-        for i, delta_i in enumerate(deltas):
-            total_dist = 0.0
-            for j, delta_j in enumerate(deltas):
-                if i != j:
-                    dist = 0.0
-                    for key in delta_i.keys():
-                        if key in delta_j:
-                            dist += torch.norm(delta_i[key] - delta_j[key]).item() ** 2
-                    total_dist += dist
-            distances.append(total_dist)
-            
-        selected_indices = sorted(range(len(distances)), key=lambda x: distances[x])[:num_select]
-        logger.info(f"Krum selected indices: {selected_indices}")
-        return selected_indices
-        
-    def federated_average(self, deltas: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        if not deltas:
-            return {}
-            
-        averaged_delta = {}
-        first_delta = deltas[0]
-        
-        for key in first_delta.keys():
-            weights = []
-            for delta in deltas:
-                if key in delta:
-                    weights.append(delta[key])
-                    
-            if weights:
-                averaged_delta[key] = torch.stack(weights).mean(dim=0)
-                
-        logger.info(f"Averaged {len(deltas)} deltas with {len(averaged_delta)} parameters")
-        return averaged_delta
-        
-    def loss_gate_validation(self, delta_weights: Dict[str, torch.Tensor]) -> bool:
-        try:
-            loss_before = self.compute_loss(self.base_model, DEV_TEXTS[:50])
-            if loss_before < 0.05:
-                logger.info(f"Skipping loss gate: loss_before={loss_before:.4f} < 0.05")
-                return True
-            model_with_delta = self.apply_lora_delta(delta_weights)
-            loss_after = self.compute_loss(model_with_delta, DEV_TEXTS[:50])
-            is_valid = loss_after < 0.999 * loss_before
-            logger.info(f"Loss gate: before={loss_before:.4f}, after={loss_after:.4f}, valid={is_valid}")
-            return is_valid
-        except Exception as e:
-            logger.error(f"Loss gate validation failed: {e}")
+        model.eval()
+        return model
+
+    async def loss_gate_validation(self, delta_weights: Dict[str, torch.Tensor]) -> bool:
+        loss_before = await self.compute_loss(self.base_model, DEV_TEXTS[:50])
+        if loss_before < MIN_LOSS_SKIP:
+            logger.info(f"Skipping gate: loss_before={loss_before:.4f} < {MIN_LOSS_SKIP}")
             return True
-            
-    def calculate_peer_id(self, validator_pubkey: bytes) -> bytes:
-        """Calculate DHT peer ID from validator BLS pubkey"""
-        import hashlib
-        hash_result = hashlib.sha256(validator_pubkey).digest()
-        return hash_result[:8]  # first 8 bytes
-        
+        model = self.apply_lora_delta(delta_weights)
+        loss_after = await self.compute_loss(model, DEV_TEXTS[:50])
+        is_valid = loss_after < LOSS_GATE_THRESHOLD * loss_before
+        logger.info(f"Loss gate: before={loss_before:.4f}, after={loss_after:.4f}, valid={is_valid}")
+        return is_valid
+
     async def publish_ack(self, agg_id: str, validator_pubkey: bytes) -> bool:
-        """Publish ACK using proper committee peer ID format"""
         try:
-            agg_id_bytes = bytes.fromhex(agg_id)
-            peer_id_bytes = self.calculate_peer_id(validator_pubkey)
-            
-            # Format: ack:{updateID[:16]}:{peerID} in hex
-            ack_key = f"ack:{agg_id_bytes[:16].hex()}:{peer_id_bytes.hex()}"
-            ack_value = b'\x01'
-            
-            success = await self.dht.store(
-                key=ack_key,
-                value=ack_value,
-                expiration_time=hivemind.get_dht_time() + 3600
-            )
-            
-            if success:
-                logger.info(f"Published ACK: {ack_key}")
-            else:
-                logger.error(f"Failed to publish ACK: {ack_key}")
-                
+            peer_id = hashlib.sha256(validator_pubkey).digest()[:8]
+            key = f"ack:{agg_id[:16]}:{peer_id.hex()}"
+            success = await self.dht.store(key=key, value=b"\x01", expiration_time=hivemind.get_dht_time()+ACK_TTL)
+            logger.info(f"ACK publish {'succeeded' if success else 'failed'}: {key}")
             return success
-            
         except Exception as e:
-            logger.error(f"Error publishing ACK: {e}")
+            logger.error(f"ACK error: {e}")
             return False
-        
+
     async def aggregate_and_validate(self, raw_ids: List[str], peer_ids: List[str]) -> Optional[str]:
-        logger.info(f"Starting aggregation for {len(raw_ids)} deltas")
-        
         deltas = []
-        valid_peer_ids = []
-        
-        for raw_id, peer_id in zip(raw_ids, peer_ids):
+        for raw_id in raw_ids:
             try:
-                dht_key = f"raw:{raw_id}"
-                result = await self.dht.get(dht_key)
-                
-                if result and result.value:
-                    delta_weights = torch.load(result.value, map_location='cpu')
-                    deltas.append(delta_weights)
-                    valid_peer_ids.append(peer_id)
-                    logger.info(f"Retrieved delta for {raw_id[:16]}")
-                else:
-                    logger.warning(f"Failed to retrieve delta for {raw_id[:16]}")
-                    
+                entry = await self.dht.get(f"{DELTA_KEY_PREFIX}{raw_id}")
+                if entry and entry.value:
+                    delta = torch.load(entry.value, map_location='cpu', weights_only=True)
+                    deltas.append(delta)
             except Exception as e:
-                logger.error(f"Error retrieving delta {raw_id[:16]}: {e}")
+                logger.warning(f"Failed to load delta {raw_id}: {e}")
                 continue
-                
+        
         if not deltas:
-            logger.error("No valid deltas retrieved")
+            logger.warning("No deltas fetched for aggregation")
             return None
-            
-        selected_indices = self.krum_selection(deltas, num_select=min(len(deltas), 3))
-        selected_deltas = [deltas[i] for i in selected_indices]
         
-        averaged_delta = self.federated_average(selected_deltas)
+        distances = [(i, sum((delta_i[k]-delta_j[k]).norm().item()**2
+                    for j, delta_j in enumerate(deltas) if i!=j for k in delta_i))
+                     for i, delta_i in enumerate(deltas)]
+        sel = sorted(distances, key=lambda x: x[1])[:min(len(deltas), 3)]
+        selected = [deltas[i] for i,_ in sel]
         
-        is_valid = self.loss_gate_validation(averaged_delta)
+        avg = {k: torch.stack([d[k] for d in selected]).mean(dim=0) for k in selected[0]}
         
-        if is_valid:
-            agg_id = hashlib.sha256(pickle.dumps(averaged_delta)).hexdigest()
-            
-            os.makedirs(f"{self.model_cache_dir}/deltas", exist_ok=True)
-            torch.save(averaged_delta, f"{self.model_cache_dir}/deltas/agg_{agg_id}.bin")
-            
-            validator_pubkey_hex = os.getenv("VALIDATOR_PUBKEY")
-            if not validator_pubkey_hex:
-                logger.error("VALIDATOR_PUBKEY environment variable not set")
-                return None
-            
-            try:
-                validator_pubkey = bytes.fromhex(validator_pubkey_hex)
-                if len(validator_pubkey) != 48:
-                    logger.error(f"Invalid validator pubkey length: {len(validator_pubkey)}, expected 48 bytes")
-                    return None
-            except ValueError:
-                logger.error(f"Invalid validator pubkey hex format: {validator_pubkey_hex}")
-                return None
-                
-            await self.publish_ack(agg_id, validator_pubkey)
-                
-            logger.info(f"Aggregation successful: {agg_id[:16]}")
-            return agg_id
-        else:
-            logger.warning(f"Aggregation failed loss gate validation")
+        if not await self.loss_gate_validation(avg):
+            logger.warning("Aggregation failed loss gate")
             return None
+        
+        agg_id = hashlib.sha256(pickle.dumps(avg)).hexdigest()
+        pubkey_hex = os.getenv("VALIDATOR_PUBKEY")
+        if pubkey_hex:
+            await self.publish_ack(agg_id, bytes.fromhex(pubkey_hex))
+        logger.info(f"Aggregation complete: {agg_id[:16]}")
+        return agg_id
+
+    async def service_loop(self):
+        seen = set()
+        async for entry in self.dht.wait_on_prefix(DELTA_KEY_PREFIX):
+            key = entry.key
+            raw_id = key.replace(DELTA_KEY_PREFIX, "")
+            if raw_id in seen:
+                continue
+            seen.add(raw_id)
+            peer_id = entry.publisher.hex()
+            logger.info(f"New delta {raw_id[:16]} from {peer_id}")
+            await self.aggregate_and_validate([raw_id], [peer_id])
+
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="POL-AI Local Averager Service")
-    parser.add_argument("--model", type=str, default="deepseek-ai/DeepSeek-R1", help="Model name")
-    parser.add_argument("--interval", type=int, default=60, help="Aggregation check interval (seconds)")
-    
-    args = parser.parse_args()
-    
-    logger.info("Starting Local Averager service...")
-    LocalAverager(model_name=args.model)
-    
-    async def service_loop():
-        while True:
-            try:
-                await asyncio.sleep(args.interval)
-                logger.debug("Averager service running...")
-            except KeyboardInterrupt:
-                logger.info("Service stopped by user")
-                break
-            except Exception as e:
-                logger.error(f"Service error: {e}")
-                await asyncio.sleep(5)
-    
+    averager = LocalAverager()
     try:
-        asyncio.run(service_loop())
+        asyncio.run(averager.service_loop())
     except KeyboardInterrupt:
-        logger.info("Local Averager service terminated")
+        logger.info("Averager stopped by user")
 
 if __name__ == "__main__":
     main()
-
- 

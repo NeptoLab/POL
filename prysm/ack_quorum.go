@@ -35,6 +35,16 @@ var (
 	ErrSlashingFailed     = errors.New("slashing submission failed")
 )
 
+// Hivemind DHT compatibility constants
+const (
+	HIVEMIND_PREFIX = "model_deltas"
+)
+
+// Helper function to create Hivemind-compatible keys
+func hivemindKey(key string) string {
+	return fmt.Sprintf("%s/%s", HIVEMIND_PREFIX, key)
+}
+
 type LogLevel int
 
 const (
@@ -90,15 +100,15 @@ func (l *Logger) Error(format string, args ...interface{}) {
 }
 
 type ACKQuorumValidator struct {
-	host         host.Host
-	dht          *dht.IpfsDHT
-	genesisHost  string
-	aiQuorum     string
-	slasherPort  string
-	mvpMode      bool
-	validBlocks  map[uint64]*ethpb.SignedBeaconBlock
-	blocksMux    sync.RWMutex
-	logger       *Logger
+	host        host.Host
+	dht         *dht.IpfsDHT
+	genesisHost string
+	aiQuorum    string
+	slasherPort string
+	mvpMode     bool
+	validBlocks map[uint64]*ethpb.SignedBeaconBlock
+	blocksMux   sync.RWMutex
+	logger      *Logger
 }
 
 func NewACKQuorumValidator() (*ACKQuorumValidator, error) {
@@ -197,22 +207,22 @@ func (v *ACKQuorumValidator) getCommitteeFromState(st state.ReadOnlyBeaconState,
 
 func (v *ACKQuorumValidator) countACKVotes(ctx context.Context, updateID string, committee [][]byte) (int, error) {
 	votes := 0
-	updateIDBytes, err := hex.DecodeString(updateID)
-	if err != nil {
-		return 0, fmt.Errorf("invalid updateID hex: %w", err)
-	}
-	
 	dhtErrors := 0
 	for _, peerID := range committee {
-		key := fmt.Sprintf("ack:%x:%x", updateIDBytes[:16], peerID)
-		
-		value, err := v.dht.GetValue(ctx, key)
+		// Create ACK key in Hivemind format: "ack:{updateID[:16]}:{peerID.hex()}"
+		updateIDPrefix := updateID[:16]
+		peerIDHex := hex.EncodeToString(peerID)
+
+		ackKey := fmt.Sprintf("ack:%s:%s", updateIDPrefix, peerIDHex)
+		hivemindAckKey := hivemindKey(ackKey)
+
+		value, err := v.dht.GetValue(ctx, hivemindAckKey)
 		if err != nil {
 			dhtErrors++
 			v.logger.Debug("DHT error for peer %x: %v", peerID, err)
 			continue
 		}
-		
+
 		if len(value) == 1 && value[0] == 0x01 {
 			votes++
 			v.logger.Debug("Valid ACK found for committee peer %x", peerID)
@@ -220,12 +230,12 @@ func (v *ACKQuorumValidator) countACKVotes(ctx context.Context, updateID string,
 			v.logger.Warn("Invalid ACK value for peer %x: %x", peerID, value)
 		}
 	}
-	
+
 	if dhtErrors > len(committee)/2 {
 		v.logger.Error("CRITICAL: DHT failure rate too high (%d/%d) - network outage detected", dhtErrors, len(committee))
 		return 0, ErrNetworkFailure
 	}
-	
+
 	v.logger.Info("ACK count for update %s: %d/%d committee members", updateID[:16], votes, len(committee))
 	return votes, nil
 }
@@ -234,26 +244,26 @@ func (v *ACKQuorumValidator) verifyBlockSignature(signed *ethpb.SignedBeaconBloc
 	if len(signed.Signature) == 0 {
 		return ErrInvalidSignature
 	}
-	
+
 	blsPubkey, err := bls.PublicKeyFromBytes(pubkey)
 	if err != nil {
 		return fmt.Errorf("invalid BLS public key: %w", err)
 	}
-	
+
 	blsSignature, err := bls.SignatureFromBytes(signed.Signature)
 	if err != nil {
 		return fmt.Errorf("invalid BLS signature: %w", err)
 	}
-	
+
 	root, err := signed.Block.HashTreeRoot()
 	if err != nil {
 		return fmt.Errorf("failed to compute block root: %w", err)
 	}
-	
+
 	if !blsSignature.Verify(blsPubkey, root[:]) {
 		return ErrInvalidSignature
 	}
-	
+
 	return nil
 }
 
@@ -300,7 +310,7 @@ func (v *ACKQuorumValidator) makeProposerSlashing(
 
 func (v *ACKQuorumValidator) submitSlashing(ctx context.Context, ps *ethpb.ProposerSlashing) error {
 	slasherAddr := fmt.Sprintf("127.0.0.1:%s", v.slasherPort)
-	
+
 	conn, err := grpc.Dial(slasherAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("%w: failed to dial slasher at %s: %v", ErrSlasherUnavailable, slasherAddr, err)
@@ -314,7 +324,7 @@ func (v *ACKQuorumValidator) submitSlashing(ctx context.Context, ps *ethpb.Propo
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrSlashingFailed, err)
 	}
-	
+
 	v.logger.Info("ProposerSlashing submitted successfully to slasher at %s", slasherAddr)
 	return nil
 }
@@ -334,9 +344,9 @@ func (v *ACKQuorumValidator) cacheValidBlock(proposerIndex uint64, signed *ethpb
 func (v *ACKQuorumValidator) slashProposer(ctx context.Context, signed *ethpb.SignedBeaconBlock, st state.ReadOnlyBeaconState, reason string) error {
 	proposerIndex := signed.Block.ProposerIndex
 	slot := signed.Block.Slot
-	
+
 	v.logger.Error("SLASHING: Proposer %d at slot %d - reason: %s", proposerIndex, slot, reason)
-	
+
 	lastValid := v.getValidBlock(proposerIndex)
 	if lastValid == nil {
 		v.logger.Warn("Cannot create ProposerSlashing - no previous block from proposer %d available", proposerIndex)
@@ -347,40 +357,40 @@ func (v *ACKQuorumValidator) slashProposer(ctx context.Context, signed *ethpb.Si
 		v.logger.Error("Cannot slash proposer %d: missing genuine signature in cached block", proposerIndex)
 		return ErrInvalidSignature
 	}
-	
+
 	if len(signed.Signature) == 0 {
 		v.logger.Error("Cannot slash proposer %d: missing genuine signature in current block", proposerIndex)
 		return ErrInvalidSignature
 	}
-	
+
 	validators := st.Validators()
 	if int(proposerIndex) >= len(validators) {
 		v.logger.Error("Invalid proposer index %d", proposerIndex)
 		return ErrInvalidAIQuorum
 	}
-	
+
 	pubkey := validators[proposerIndex].PublicKey
 	if err := v.verifyBlockSignature(signed, pubkey); err != nil {
 		v.logger.Error("Invalid signature on current block: %v", err)
 		return err
 	}
-	
+
 	if err := v.verifyBlockSignature(lastValid, pubkey); err != nil {
 		v.logger.Error("Invalid signature on cached block: %v", err)
 		return err
 	}
-	
+
 	ps, err := v.makeProposerSlashing(ctx, uint64(proposerIndex), lastValid, signed)
 	if err != nil {
 		v.logger.Error("Failed to create ProposerSlashing: %v", err)
 		return ErrSlashingFailed
 	}
-	
+
 	if err := v.submitSlashing(ctx, ps); err != nil {
 		v.logger.Error("Failed to submit ProposerSlashing: %v", err)
 		return err
 	}
-	
+
 	v.logger.Info("ProposerSlashing submitted for proposer %d: %s", proposerIndex, reason)
 	return nil
 }
@@ -388,7 +398,7 @@ func (v *ACKQuorumValidator) slashProposer(ctx context.Context, signed *ethpb.Si
 func (v *ACKQuorumValidator) validateAIBlock(ctx context.Context, signed *ethpb.SignedBeaconBlock, st state.ReadOnlyBeaconState) error {
 	block := signed.Block
 	extraData := block.Body.ExecutionPayload.ExtraData
-	
+
 	if len(extraData) < 64 {
 		v.logger.Debug("Block %d: No AI data in extraData (length %d < 64)", block.Slot, len(extraData))
 		return nil
@@ -397,7 +407,7 @@ func (v *ACKQuorumValidator) validateAIBlock(ctx context.Context, signed *ethpb.
 	parentSha := hex.EncodeToString(extraData[0:32])
 	updateIDBytes := extraData[32:64]
 	updateID := hex.EncodeToString(updateIDBytes)
-	
+
 	allZeros := true
 	for _, b := range updateIDBytes {
 		if b != 0 {
@@ -405,7 +415,7 @@ func (v *ACKQuorumValidator) validateAIBlock(ctx context.Context, signed *ethpb.
 			break
 		}
 	}
-	
+
 	if allZeros {
 		v.logger.Debug("Block %d: Empty AI block (parentSha: %s), no validation needed", block.Slot, parentSha[:16])
 		return nil
@@ -419,7 +429,7 @@ func (v *ACKQuorumValidator) validateAIBlock(ctx context.Context, signed *ethpb.
 	}
 
 	requiredQuorum := v.calculateACKQuorum(len(committee))
-	
+
 	if v.aiQuorum != "auto" {
 		if customQuorum, err := strconv.Atoi(v.aiQuorum); err == nil {
 			requiredQuorum = customQuorum
@@ -437,27 +447,27 @@ func (v *ACKQuorumValidator) validateAIBlock(ctx context.Context, signed *ethpb.
 	}
 
 	if votes < requiredQuorum {
-		v.logger.Warn("Block %d: ACK quorum not reached for update %s (%d/%d)", 
+		v.logger.Warn("Block %d: ACK quorum not reached for update %s (%d/%d)",
 			block.Slot, updateID[:32], votes, requiredQuorum)
-		
+
 		if v.mvpMode {
-			v.logger.Info("Block %d: MVP mode - rejecting block without slashing proposer %d", 
+			v.logger.Info("Block %d: MVP mode - rejecting block without slashing proposer %d",
 				block.Slot, block.ProposerIndex)
 			return ErrInvalidAIQuorum
 		}
-		
+
 		err := v.slashProposer(ctx, signed, st, "insufficient ACK quorum for AI update")
 		if err != nil {
 			v.logger.Error("Block %d: Failed to slash proposer, falling back to block rejection: %v", block.Slot, err)
 			return ErrInvalidAIQuorum
 		}
-		
+
 		return fmt.Errorf("insufficient ACK quorum for AI update: %d/%d", votes, requiredQuorum)
 	}
 
-	v.logger.Info("Block %d: AI ACK quorum validation successful for update %s (%d/%d)", 
+	v.logger.Info("Block %d: AI ACK quorum validation successful for update %s (%d/%d)",
 		block.Slot, updateID[:32], votes, requiredQuorum)
-	
+
 	v.cacheValidBlock(block.ProposerIndex, signed)
 
 	return nil
@@ -492,7 +502,7 @@ func ValidateAIBlock(ctx context.Context, signed *ethpb.SignedBeaconBlock, st st
 			return fmt.Errorf("failed to initialize ACK validator: %w", err)
 		}
 	}
-	
+
 	return globalACKValidator.ProcessBlock(ctx, signed, st)
 }
 
@@ -500,10 +510,10 @@ func ProcessBlockWithAIValidation(ctx context.Context, signed *ethpb.SignedBeaco
 	if err := blocks.ProcessBlock(ctx, st, signed); err != nil {
 		return err
 	}
-	
+
 	if err := ValidateAIBlock(ctx, signed, st); err != nil {
 		return fmt.Errorf("AI validation failed: %w", err)
 	}
-	
+
 	return nil
-} 
+}

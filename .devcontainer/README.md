@@ -32,5 +32,4 @@ The following ports are automatically forwarded:
 
 Once in the container, you can run the system components as normal:
 - `python3 ai/trainer.py`
-- `python3 dht/dht_daemon.py`
 - `go run engine/main.go` 
